@@ -220,6 +220,162 @@ function check(word) {
 	return word && word.length > 2;
 }
 
+function linkPreview(options = {}) {
+	const config = require('../config');
+	const LINK_PREVIEW = config.get('bot.linkPreview') || 'HyperWa;Advanced WhatsApp Bot;https://i.imgur.com/qyvmAzS.jpeg;https://github.com/hyperwa-official';
+	if (!LINK_PREVIEW || LINK_PREVIEW.toLowerCase() === 'false' || LINK_PREVIEW.toLowerCase() === 'null') return undefined;
+	const [title, body, thumb, source] = LINK_PREVIEW.split(/[;,|]/);
+	return {
+		showAdAttribution: true,
+		title: options.title || title || 'HyperWa',
+		body: options.body || body,
+		mediaType: 1,
+		thumbnailUrl: options.url || thumb || 'https://i.imgur.com/qyvmAzS.jpeg',
+		sourceUrl: source || 'https://github.com/hyperwa-official'
+	};
+}
+
+async function send_menu(message) {
+    const config = require('../config');
+    const BOT_INFO = config.get('bot.name') + ';' + config.get('bot.company') + ';https://i.imgur.com/qyvmAzS.jpeg';
+    const image = MediaUrls(BOT_INFO);
+    let img_url;
+    let theam = 'text';
+    let botInfoContent = BOT_INFO;
+    
+    if (image) {
+        img_url = image[0];
+        theam = img_url.video ? 'video' : 'image';
+        botInfoContent = botInfoContent.replace(img_url, '').trim();
+    }
+    
+    const info_vars = botInfoContent.split(/[;,|]/);
+    let date = new Date().toLocaleDateString("EN", {
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+    });
+    let types = {};
+    let menu = `*Owner: ${(info_vars[0] || info_vars || '').replace(/[;,|]/g,'')}*
+*User: @${message.number}*
+*Plugins: ${message.client.moduleLoader?.modules?.size || 0}*
+*Prefix: ${config.get('bot.prefix')}*
+*Date: ${date}*
+*Mode: ${config.get('features.mode')}*
+*Version: ${config.get('bot.version')}*
+*Ram: ${format(os.totalmem()-os.freemem())}*\n\n`;
+
+    // Get modules and their commands
+    if (message.client.moduleLoader?.modules) {
+        for (const [name, moduleInfo] of message.client.moduleLoader.modules) {
+            if (moduleInfo.instance.commands) {
+                for (const command of moduleInfo.instance.commands) {
+                    const type = (command.category || 'misc').toLowerCase();
+                    if(!types[type]) types[type] = [];
+                    types[type].push(command.name);
+                }
+            }
+        }
+    }
+
+    const cmd_list = Object.keys(types);
+    cmd_list.forEach((cmmd) => {
+        menu += `⭓ ${addSpace('*'+cmmd.toUpperCase()+'*',14,"both")} ⭓`;
+        types[cmmd].map(a => {
+            menu += `\n• _${a.replace(/[^a-zA-Z0-9-+]/g,'')}_`;
+        });
+        menu += `\n\n${String.fromCharCode(8206).repeat(4001)}`;
+    });
+
+    const options = {
+        contextInfo: {
+            mentionedJid: [message.sender]
+        }
+    };
+
+    const linkPrev = linkPreview();
+    if(linkPrev){
+        options.contextInfo.externalAdReply = linkPrev;
+    }
+
+    if (theam == 'text') {
+        return await message.client.sendMessage(message.jid, {
+            text: menu,
+            ...options
+        });
+    } else {
+        return await message.client.sendMessage(message.from, {
+            [theam]: {
+                url: img_url
+            },
+            caption: menu,
+            ...options
+        });
+    }
+}
+
+async function send_alive(message, ALIVE_DATA) {
+	const config = require('../config');
+	const sstart = new Date().getTime();
+	let msg = {
+		contextInfo: {}
+	}
+	const prefix = config.get('bot.prefix') == "false" ? '' : config.get('bot.prefix');
+	let extractions = ALIVE_DATA.match(/#(.*?)#/g);
+	let URLS;
+	if (extractions) {
+		ALIVE_DATA = ALIVE_DATA.replace(/#([^#]+)#/g, '');
+		extractions = extractions.map(m => m.slice(1, -1));
+		URLS = MediaUrls(ALIVE_DATA);
+		msg.contextInfo.externalAdReply = {
+			containsAutoReply: true,
+			mediaType: 1,
+			previewType: "PHOTO"
+		};
+		extractions.map(extraction => {
+			extraction = extraction.replace('\\', '');
+			if (extraction.match(/adattribution/gi)) msg.contextInfo.externalAdReply.showAdAttribution = true;
+			if (extraction.match(/adreply/gi)) msg.contextInfo.externalAdReply.showAdAttribution = true;
+			if (extraction.match(/largerthumbnail/gi)) msg.contextInfo.externalAdReply.renderLargerThumbnail = true;
+			if (extraction.match(/largethumb/gi)) msg.contextInfo.externalAdReply.renderLargerThumbnail = true;
+			if (extraction.match(/title/gi)) msg.contextInfo.externalAdReply.title = extraction.replace(/title/gi, '');
+			if (extraction.match(/body/gi)) msg.contextInfo.externalAdReply.body = extraction.replace(/body/gi, '');
+			if (extraction.match(/thumbnail/gi) && !extraction.match(/largerthumbnail/gi)) msg.contextInfo.externalAdReply.thumbnailUrl = extraction.replace(/thumbnail/gi, '');
+			if (extraction.match(/thumb/gi) && !extraction.match(/largerthumbnail/gi) && !extraction.match(/largethumb/gi) && !extraction.match(/thumbnail/gi)) msg.contextInfo.externalAdReply.thumbnailUrl = extraction.replace(/thumb/gi, '');
+			if (extraction.match(/sourceurl/gi)) msg.contextInfo.externalAdReply.sourceUrl = extraction.replace(/sourceurl/gi, '');
+			if (extraction.match(/mediaurl/gi)) msg.contextInfo.externalAdReply.mediaUrl = extraction.replace(/mediaurl/gi, '');
+		});
+	} else {
+		URLS = MediaUrls(ALIVE_DATA);
+	}
+	let date = new Date().toLocaleDateString("EN", {
+		year: "numeric",
+		month: "long",
+		day: "numeric",
+	});
+	const URL = URLS ? URLS[Math.floor(Math.random() * URLS.length)] : null;
+	const platform = os.platform();
+	const sender = message.sender;
+	const user = message.pushName;
+	let text = ALIVE_DATA.replace(/&ram/gi, format(os.totalmem() - os.freemem())).replace(/&sender/gi, `@${sender.replace(/[^0-9]/g,'')}`).replace(/&user/gi, `${user}`).replace(/&version/gi, `${config.get('bot.version')}`).replace(/&prefix/gi, `${prefix}`).replace(/&mode/gi, `${config.get('features.mode')}`).replace(/&platform/gi, `${platform}`).replace(/&date/gi, `${date}`).replace(/&speed/gi, `${sstart-new Date().getTime()}`).replace(/&gif/g, '');
+	if (ALIVE_DATA.includes('&sender')) msg.contextInfo.mentionedJid = [sender];
+	if (ALIVE_DATA.includes('&gif')) msg.gifPlayback = true;
+	if (URL && URL.endsWith('.mp4')) {
+		msg.video = {
+				url: URL
+			},
+			msg.caption = URLS.map(url => text = text.replace(url, ''));
+
+	} else if (URL) {
+		msg.image = {
+				url: URL
+			},
+			msg.caption = URLS.map(url => text = text.replace(url, ''));
+
+	} else msg.text = text.trim();
+	return await message.client.sendMessage(message.jid, msg);
+}
+
 module.exports = {
 	isAdmin,
 	isBotAdmin,
@@ -243,5 +399,8 @@ module.exports = {
 	bytesToSize,
 	runtime,
 	getRandom,
-	check
+	check,
+	linkPreview,
+	send_menu,
+	send_alive
 };

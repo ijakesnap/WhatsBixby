@@ -2,7 +2,7 @@ const {
     Sequelize,
     DataTypes
 } = require("sequelize");
-const { sequelizeDb } = require("./db");
+const { DATABASE } = require("./db");
 
 const methods = ['get', 'set', 'add','delete'];
 const types = [{'mention': 'object'}, {'ban': 'string'}, {'alive': 'string'}, {'login': 'string'}, {'shutoff': 'string'}, {'owner_updt': 'string'}, {'commit_key': 'string'}, {'sticker_cmd': 'object'}, {'plugins': 'object'}, {'toggle': 'object'}];
@@ -14,7 +14,7 @@ function jsonConcat(o1, o2) {
  return o1;
 }
 
-const personalDb = sequelizeDb.define("personalDB", {
+const personalDb = DATABASE.define("personalDB", {
     mention: {
         type: DataTypes.TEXT,
         allowNull: true

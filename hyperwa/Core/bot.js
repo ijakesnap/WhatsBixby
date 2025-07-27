@@ -9,6 +9,10 @@ const MessageHandler = require('./message-handler');
 const { connectDb } = require('../utils/db');
 const ModuleLoader = require('./module-loader');
 const { useMongoAuthState } = require('../utils/mongoAuthState');
+const { serialize, WAConnection } = require('./serialize');
+const { personalDB } = require('../utils/personalDB');
+const { groupDB } = require('../utils/groupDB');
+const greetings = require('../utils/greetings');
 
 class HyperWaBot {
     constructor() {
@@ -21,6 +25,7 @@ class HyperWaBot {
         this.moduleLoader = new ModuleLoader(this);
         this.qrCodeSent = false;
         this.useMongoAuth = config.get('auth.useMongoAuth', false);
+        this.wcg = {}; // Word Chain Game storage
     }
 
     async initialize() {
@@ -171,6 +176,58 @@ class HyperWaBot {
 
         this.sock.ev.on('creds.update', saveCreds);
         this.sock.ev.on('messages.upsert', this.messageHandler.handleMessages.bind(this.messageHandler));
+        this.sock.ev.on('messages.delete', this.handleMessageDelete.bind(this));
+        this.sock.ev.on('group-participants.update', this.handleGroupUpdate.bind(this));
+    }
+
+    async handleMessageDelete(deleteInfo) {
+        try {
+            for (const key of deleteInfo.keys) {
+                const groupId = key.remoteJid;
+                if (!groupId?.endsWith('@g.us')) continue;
+
+                const { antidelete } = await groupDB(['delete'], { jid: groupId, content: {} }, 'get');
+                if (antidelete === 'true') {
+                    // Forward the deleted message info
+                    await this.sock.sendMessage(groupId, {
+                        text: `🗑️ *Message Deleted*\n\n👤 From: @${key.participant?.split('@')[0] || 'Unknown'}\n⏰ Time: ${new Date().toLocaleString()}`,
+                        mentions: key.participant ? [key.participant] : []
+                    });
+                }
+            }
+        } catch (error) {
+            logger.error('Error handling message delete:', error);
+        }
+    }
+
+    async handleGroupUpdate(update) {
+        try {
+            const { id: groupId, participants, action } = update;
+            
+            // Handle promote/demote protection
+            if (action === 'promote' || action === 'demote') {
+                const settings = await groupDB([action], { jid: groupId, content: {} }, 'get');
+                if (settings[action] === 'true') {
+                    // Reverse the action
+                    const reverseAction = action === 'promote' ? 'demote' : 'promote';
+                    for (const participant of participants) {
+                        await this.sock.groupParticipantsUpdate(groupId, [participant], reverseAction);
+                    }
+                    await this.sock.sendMessage(groupId, {
+                        text: `🔒 Anti-${action} protection activated. Action reversed.`
+                    });
+                }
+            }
+
+            // Handle welcome/goodbye messages
+            if (action === 'add' || action === 'remove') {
+                const welcomeSettings = await groupDB(['welcome', 'exit'], { jid: groupId, content: {} }, 'get');
+                await greetings({ id: groupId, participants, action }, this.sock, welcomeSettings);
+            }
+
+        } catch (error) {
+            logger.error('Error handling group update:', error);
+        }
     }
 
     async onConnectionOpen() {

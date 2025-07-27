@@ -2,7 +2,7 @@ const {
     Sequelize,
     DataTypes
 } = require("sequelize");
-const { sequelizeDb } = require("./db");
+const { DATABASE } = require("./db");
 
 const methods = ['get', 'set', 'add','delete'];
 const types = [{'bot': 'object'}, {'delete': 'string'}, {'fake': 'object'}, {'link': 'object'}, {'word': 'object'}, {'demote': 'string'}, {'promote': 'string'}, {'filter': 'object'}, {'warn': 'object'}, {'welcome': 'object'}, {'exit': 'object'}, {'pdm': 'string'}];
@@ -14,7 +14,7 @@ function jsonConcat(o1, o2) {
  return o1;
 }
 
-const groupDb = sequelizeDb.define("groupDB", {
+const groupDb = DATABASE.define("groupDB", {
     jid: {
         type: DataTypes.STRING,
         allowNull: false

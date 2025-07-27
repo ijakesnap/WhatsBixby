@@ -1,7 +1,7 @@
 
 const config = require('../config');
 const { MongoClient } = require('mongodb');
-const { Sequelize, DataTypes } = require('sequelize');
+const { Sequelize } = require('sequelize');
 
 const MONGO_URI = config.get('mongo.uri');
 const DB_NAME = config.get('mongo.dbName');
@@ -20,8 +20,7 @@ async function connectDb() {
 }
 
 // Sequelize database setup matching WhatsBixby structure
-const DB_URL = process.env.DATABASE_URL || '';
-const sequelizeDb = DB_URL ? new Sequelize(DB_URL, {
+const DATABASE = process.env.DATABASE_URL ? new Sequelize(process.env.DATABASE_URL, {
     dialect: 'postgres',
     ssl: true,
     protocol: 'postgres',
@@ -39,4 +38,4 @@ const sequelizeDb = DB_URL ? new Sequelize(DB_URL, {
     logging: false
 });
 
-module.exports = { connectDb, sequelizeDb };
+module.exports = { connectDb, DATABASE };
