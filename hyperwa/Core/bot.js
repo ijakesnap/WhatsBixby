@@ -1,320 +1,520 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
-const qrcode = require('qrcode-terminal');
-const fs = require('fs-extra');
 const path = require('path');
-
-const config = require('../config');
+const fs = require('fs-extra');
 const logger = require('./logger');
-const MessageHandler = require('./message-handler');
-const { connectDb } = require('../utils/db');
-const ModuleLoader = require('./module-loader');
-const { useMongoAuthState } = require('../utils/mongoAuthState');
-const { serialize, WAConnection } = require('./serialize');
-const { personalDB } = require('../utils/personalDB');
-const { groupDB } = require('../utils/groupDB');
-const greetings = require('../utils/greetings');
-
-class HyperWaBot {
-    constructor() {
-        this.sock = null;
-        this.authPath = './auth_info';
-        this.messageHandler = new MessageHandler(this);
-        this.telegramBridge = null;
-        this.isShuttingDown = false;
-        this.db = null;
-        this.moduleLoader = new ModuleLoader(this);
-        this.qrCodeSent = false;
-        this.useMongoAuth = config.get('auth.useMongoAuth', false);
-        this.wcg = {}; // Word Chain Game storage
+const config = require('../config');
+const helpers = require('../utils/helpers');
+// Temporary in-memory store; replace with DB for persistence
+const helpPreferences = new Map();
+class ModuleLoader {
+    constructor(bot) {
+        this.bot = bot;
+        this.modules = new Map();
+        this.systemModulesCount = 0;
+        this.customModulesCount = 0;
+        this.setupModuleCommands();
+        
     }
 
-    async initialize() {
-        logger.info('🔧 Initializing HyperWa Userbot...');
-
-        try {
-            this.db = await connectDb();
-            logger.info('✅ Database connected successfully!');
-        } catch (error) {
-            logger.error('❌ Failed to connect to database:', error);
-            process.exit(1);
-        }
-
-        if (config.get('telegram.enabled')) {
-            try {
-                const TelegramBridge = require('../telegram/bridge');
-                this.telegramBridge = new TelegramBridge(this);
-                await this.telegramBridge.initialize();
-                logger.info('✅ Telegram bridge initialized');
+    setupModuleCommands() {
+        // Load Module Command
+        const loadModuleCommand = {
+            name: 'lm',
+            description: 'Load a module from file',
+            usage: '.lm (reply to a .js file)',
+            permissions: 'owner',
+            execute: async (msg, params, context) => {
+                if (!msg.message?.documentMessage?.fileName?.endsWith('.js')) {
+                    return context.bot.sendMessage(context.sender, {
+                        text: '🔧 *Load Module*\n\n❌ Please reply to a JavaScript (.js) file to load it as a module.'
+                    });
+                }
 
                 try {
-                    await this.telegramBridge.sendStartMessage();
-                } catch (err) {
-                    logger.warn('⚠️ Failed to send start message via Telegram:', err.message);
+                    const processingMsg = await context.bot.sendMessage(context.sender, {
+                        text: '⚡ *Loading Module*\n\n🔄 Downloading and installing module...\n⏳ Please wait...'
+                    });
+
+                    const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
+                    const stream = await downloadContentFromMessage(msg.message.documentMessage, 'document');
+                    
+                    const chunks = [];
+                    for await (const chunk of stream) {
+                        chunks.push(chunk);
+                    }
+                    const buffer = Buffer.concat(chunks);
+                    
+                    const fileName = msg.message.documentMessage.fileName;
+                    const customModulesPath = path.join(__dirname, '../custom_modules');
+                    await fs.ensureDir(customModulesPath);
+                    
+                    const filePath = path.join(customModulesPath, fileName);
+                    await fs.writeFile(filePath, buffer);
+                    
+                    await this.loadModule(filePath, false);
+                    
+                    await context.bot.sock.sendMessage(context.sender, {
+                        text: `✅ *Module Loaded Successfully*\n\n📦 Module: \`${fileName}\`\n📁 Location: Custom Modules\n🎯 Status: Active\n⏰ ${new Date().toLocaleTimeString()}`,
+                        edit: processingMsg.key
+                    });
+
+                } catch (error) {
+                    logger.error('Failed to load module:', error);
+                    await context.bot.sendMessage(context.sender, {
+                        text: `❌ *Module Load Failed*\n\n🚫 Error: ${error.message}\n🔧 Please check the module file format.`
+                    });
                 }
-            } catch (error) {
-                logger.warn('⚠️ Telegram bridge failed to initialize:', error.message);
-                this.telegramBridge = null;
             }
-        }
+        };
 
-        await this.moduleLoader.loadModules();
-        await this.startWhatsApp();
-
-        logger.info('✅ HyperWa Userbot initialized successfully!');
-    }
-
-    async startWhatsApp() {
-    let state, saveCreds;
-
-    // Clean up existing socket if present
-    if (this.sock) {
-        logger.info('🧹 Cleaning up existing WhatsApp socket');
-        this.sock.ev.removeAllListeners(); // Remove all event listeners
-        await this.sock.end(); // Close the socket
-        this.sock = null; // Reset socket
-    }
-
-    // Choose auth method based on configuration
-    if (this.useMongoAuth) {
-        logger.info('🔧 Using MongoDB auth state...');
-        try {
-            ({ state, saveCreds } = await useMongoAuthState());
-        } catch (error) {
-            logger.error('❌ Failed to initialize MongoDB auth state:', error);
-            logger.info('🔄 Falling back to file-based auth...');
-            ({ state, saveCreds } = await useMultiFileAuthState(this.authPath));
-        }
-    } else {
-        logger.info('🔧 Using file-based auth state...');
-        ({ state, saveCreds } = await useMultiFileAuthState(this.authPath));
-    }
-
-    const { version } = await fetchLatestBaileysVersion();
-
-    try {
-        this.sock = makeWASocket({
-            auth: state,
-            version,
-            printQRInTerminal: false,
-            logger: logger.child({ module: 'baileys' }),
-            getMessage: async (key) => ({ conversation: 'Message not found' }),
-            browser: ['HyperWa', 'Chrome', '3.0'],
-        });
-
-        const connectionPromise = new Promise((resolve, reject) => {
-            const connectionTimeout = setTimeout(() => {
-                if (!this.sock.user) {
-                    logger.warn('❌ QR code scan timed out after 30 seconds');
-                    this.sock.ev.removeAllListeners(); // Clean up listeners
-                    this.sock.end(); // Close socket
-                    this.sock = null; // Reset socket
-                    reject(new Error('QR code scan timed out'));
+        // Unload Module Command
+        const unloadModuleCommand = {
+            name: 'ulm',
+            description: 'Unload a module',
+            usage: '.ulm <module_name>',
+            permissions: 'owner',
+            execute: async (msg, params, context) => {
+                if (params.length === 0) {
+                    const moduleList = this.listModules().join('\n• ');
+                    return context.bot.sendMessage(context.sender, {
+                        text: `🔧 *Unload Module*\n\n📋 Available modules:\n• ${moduleList}\n\n💡 Usage: \`.ulm <module_name>\``
+                    });
                 }
-            }, 30000);
 
-            this.sock.ev.on('connection.update', update => {
-                if (update.connection === 'open') {
-                    clearTimeout(connectionTimeout);
-                    resolve();
+                const moduleName = params[0];
+                
+                try {
+                    const processingMsg = await context.bot.sendMessage(context.sender, {
+                        text: `⚡ *Unloading Module*\n\n🔄 Removing: \`${moduleName}\`\n⏳ Please wait...`
+                    });
+
+                    await this.unloadModule(moduleName);
+                    
+                    await context.bot.sock.sendMessage(context.sender, {
+                        text: `✅ *Module Unloaded Successfully*\n\n📦 Module: \`${moduleName}\`\n🗑️ Status: Removed\n⏰ ${new Date().toLocaleTimeString()}`,
+                        edit: processingMsg.key
+                    });
+
+                } catch (error) {
+                    logger.error('Failed to unload module:', error);
+                    await context.bot.sendMessage(context.sender, {
+                        text: `❌ *Module Unload Failed*\n\n🚫 Error: ${error.message}\n📦 Module: \`${moduleName}\``
+                    });
                 }
-            });
-        });
+            }
+        };
 
-        this.setupEventHandlers(saveCreds);
-        await connectionPromise;
-    } catch (error) {
-        logger.error('❌ Failed to initialize WhatsApp socket:', error);
-        logger.info('🔄 Retrying with new QR code...');
-        setTimeout(() => this.startWhatsApp(), 5000);
-    }
-}
+        // Reload Module Command
+        const reloadModuleCommand = {
+            name: 'rlm',
+            description: 'Reload a module',
+            usage: '.rlm <module_name>',
+            permissions: 'owner',
+            execute: async (msg, params, context) => {
+                if (params.length === 0) {
+                    const moduleList = this.listModules().join('\n• ');
+                    return context.bot.sendMessage(context.sender, {
+                        text: `🔧 *Reload Module*\n\n📋 Available modules:\n• ${moduleList}\n\n💡 Usage: \`.rlm <module_name>\``
+                    });
+                }
 
-    setupEventHandlers(saveCreds) {
-        this.sock.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect, qr } = update;
+                const moduleName = params[0];
+                
+                try {
+                    const processingMsg = await context.bot.sendMessage(context.sender, {
+                        text: `⚡ *Reloading Module*\n\n🔄 Restarting: \`${moduleName}\`\n⏳ Please wait...`
+                    });
 
-            if (qr) {
-                logger.info('📱 WhatsApp QR code generated');
-                qrcode.generate(qr, { small: true });
+                    await this.reloadModule(moduleName);
+                    
+                    await context.bot.sock.sendMessage(context.sender, {
+                        text: `✅ *Module Reloaded Successfully*\n\n📦 Module: \`${moduleName}\`\n🔄 Status: Restarted\n⏰ ${new Date().toLocaleTimeString()}`,
+                        edit: processingMsg.key
+                    });
 
-                if (this.telegramBridge) {
-                    try {
-                        await this.telegramBridge.sendQRCode(qr);
-                    } catch (error) {
-                        logger.warn('⚠️ TelegramBridge failed to send QR:', error.message);
+                } catch (error) {
+                    logger.error('Failed to reload module:', error);
+                    await context.bot.sendMessage(context.sender, {
+                        text: `❌ *Module Reload Failed*\n\n🚫 Error: ${error.message}\n📦 Module: \`${moduleName}\``
+                    });
+                }
+            }
+        };
+
+        // List Modules Command
+        const listModulesCommand = {
+            name: 'modules',
+            description: 'List all loaded modules',
+            usage: '.modules',
+            permissions: 'public',
+            execute: async (msg, params, context) => {
+                const systemModules = [];
+                const customModules = [];
+                
+                for (const [name, moduleInfo] of this.modules) {
+                    if (moduleInfo.isSystem) {
+                        systemModules.push(name);
+                    } else {
+                        customModules.push(name);
                     }
                 }
+
+                let moduleText = `🔧 *Loaded Modules*\n\n`;
+                moduleText += `📊 **System Modules (${systemModules.length}):**\n`;
+                if (systemModules.length > 0) {
+                    moduleText += `• ${systemModules.join('\n• ')}\n\n`;
+                } else {
+                    moduleText += `• None loaded\n\n`;
+                }
+                
+                moduleText += `🎨 **Custom Modules (${customModules.length}):**\n`;
+                if (customModules.length > 0) {
+                    moduleText += `• ${customModules.join('\n• ')}\n\n`;
+                } else {
+                    moduleText += `• None loaded\n\n`;
+                }
+                
+                moduleText += `📈 **Total:** ${this.modules.size} modules active`;
+
+                await context.bot.sendMessage(context.sender, { text: moduleText });
+            }
+        };
+
+        // Register module management commands
+        this.bot.messageHandler.registerCommandHandler('lm', loadModuleCommand);
+        this.bot.messageHandler.registerCommandHandler('ulm', unloadModuleCommand);
+        this.bot.messageHandler.registerCommandHandler('rlm', reloadModuleCommand);
+        this.bot.messageHandler.registerCommandHandler('modules', listModulesCommand);
+    }
+
+async loadModules() {
+    const systemPath = path.join(__dirname, '../modules');
+    const customPath = path.join(__dirname, '../custom_modules');
+
+    await fs.ensureDir(systemPath);
+    await fs.ensureDir(customPath);
+
+    const [systemFiles, customFiles] = await Promise.all([
+        fs.readdir(systemPath),
+        fs.readdir(customPath)
+    ]);
+
+    this.systemModulesCount = 0;
+    this.customModulesCount = 0;
+
+    for (const file of systemFiles) {
+        if (file.endsWith('.js')) {
+            await this.loadModule(path.join(systemPath, file), true);
+        }
+    }
+
+    for (const file of customFiles) {
+        if (file.endsWith('.js')) {
+            await this.loadModule(path.join(customPath, file), false);
+        }
+    }
+logger.info(`Modules Loaded || 🧩 System: ${this.systemModulesCount} || 📦 Custom: ${this.customModulesCount} || 📊 Total: ${this.systemModulesCount + this.customModulesCount}`);
+
+
+        // Load help system after all modules
+        this.setupHelpSystem();
+
+    }
+
+
+
+setupHelpSystem() {
+    const helpPreferences = new Map();
+
+    const getUserPermissions = (userId) => {
+        const owner = config.get('bot.owner')?.split('@')[0]; // Get owner ID without domain
+        const isOwner = owner === userId;
+        const admins = config.get('bot.admins') || [];
+        const isAdmin = admins.includes(userId);
+        return isOwner ? ['public', 'admin', 'owner'] : isAdmin ? ['public', 'admin'] : ['public'];
+    };
+
+    const helpCommand = {
+        name: 'help',
+        description: 'Show available commands or help for a module',
+        usage: '.help [module_name] | .help 1|2 | .help show 1|2|3',
+        permissions: 'public',
+        execute: async (msg, params, context) => {
+        const userId = context.sender.split('@')[0]; // Normalize userId
+        const userPerms = getUserPermissions(userId);
+
+        const helpConfig = config.get('help') || {};
+        const defaultStyle = helpConfig.defaultStyle || 1;
+        const defaultShow = helpConfig.defaultShow || 'description';
+        const pref = helpPreferences.get(userId) || { style: defaultStyle, show: defaultShow };
+
+            // Handle `.help 1` / `.help 2` (style switch)
+            if (params.length === 1 && ['1', '2'].includes(params[0])) {
+                pref.style = Number(params[0]);
+                helpPreferences.set(userId, pref);
+                await context.bot.sendMessage(context.sender, {
+                    text: `✅ Help style set to *${pref.style}*`
+                });
+                return;
             }
 
-            if (connection === 'close') {
-                const statusCode = lastDisconnect?.error?.output?.statusCode || 0;
-                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+            // Handle `.help show 1|2|3`
+            if (params.length === 2 && params[0] === 'show') {
+                const map = { '1': 'description', '2': 'usage', '3': 'none' };
+                if (!map[params[1]]) {
+                    return await context.bot.sendMessage(context.sender, {
+                        text: `❌ Invalid show option.\nUse:\n.help show 1 (description)\n.help show 2 (usage)\n.help show 3 (none)`
+                    });
+                }
+                pref.show = map[params[1]];
+                helpPreferences.set(userId, pref);
+                return await context.bot.sendMessage(context.sender, {
+                    text: `✅ Help display mode set to *${pref.show}*`
+                });
+            }
 
-                if (shouldReconnect && !this.isShuttingDown) {
-                    logger.warn('🔄 Connection closed, reconnecting...');
-                    setTimeout(() => this.startWhatsApp(), 5000);
-                } else {
-                    logger.error('❌ Connection closed permanently. Please delete auth_info and restart.');
+            // Handle `.help [module]`
+            if (params.length === 1) {
+                const moduleName = params[0].toLowerCase();
+                const moduleInfo = this.getModule(moduleName);
 
-                    if (this.useMongoAuth) {
-                        try {
-                            const db = await connectDb();
-                            const coll = db.collection("auth");
-                            await coll.deleteOne({ _id: "session" });
-                            logger.info('🗑️ MongoDB auth session cleared');
-                        } catch (error) {
-                            logger.error('❌ Failed to clear MongoDB auth session:', error);
+                if (!moduleInfo) {
+                    return await context.bot.sendMessage(context.sender, {
+                        text: `❌ Module *${moduleName}* not found.\nUse *.help* to view available modules.`
+                    });
+                }
+
+                const commands = Array.isArray(moduleInfo.commands) ? moduleInfo.commands : [];
+
+                const visibleCommands = commands.filter(cmd => {
+                    const perms = Array.isArray(cmd.permissions) ? cmd.permissions : [cmd.permissions];
+                    return perms.some(p => userPerms.includes(p));
+                });
+
+                let out = '';
+                if (pref.style === 2) {
+                    out += `██▓▒░ *${moduleName}*\n\n`;
+                    for (const cmd of visibleCommands) {
+                        const info = pref.show === 'usage' ? cmd.usage : cmd.description;
+                        if (pref.show === 'none') {
+                            out += `  ↳ *${cmd.name}*\n`;
+                        } else {
+                            out += `  ↳ *${cmd.name}*: ${info}\n`;
                         }
                     }
-
-                    process.exit(1);
+                } else {
+                    out += `╔══  *${moduleName}* ══\n`;
+                    for (const cmd of visibleCommands) {
+                        const info = pref.show === 'usage' ? cmd.usage : cmd.description;
+                        if (pref.show === 'none') {
+                            out += `║ *${cmd.name}*\n`;
+                        } else {
+                            out += `║ *${cmd.name}* – ${info}\n`;
+                        }
+                    }
+                    out += `╚═══════════════`;
                 }
-            } else if (connection === 'open') {
-                await this.onConnectionOpen();
+
+                return await context.bot.sendMessage(context.sender, { text: out });
+            }
+
+            // Render all modules
+            const systemModules = [];
+            const customModules = [];
+
+            for (const [name, moduleInfo] of this.modules) {
+                const entry = { name, instance: moduleInfo.instance };
+                moduleInfo.isSystem ? systemModules.push(entry) : customModules.push(entry);
+            }
+
+            const renderModuleBlock = (modules) => {
+                let block = '';
+                for (const mod of modules) {
+                    const commands = Array.isArray(mod.instance.commands) ? mod.instance.commands : [];
+                    const visible = commands.filter(c => {
+                        const perms = Array.isArray(c.permissions) ? c.permissions : [c.permissions];
+                        return perms.some(p => userPerms.includes(p));
+                    });
+                    if (visible.length === 0) continue;
+
+                    if (pref.style === 2) {
+                        block += `██▓▒░ *${mod.name}*\n\n`;
+                        for (const cmd of visible) {
+                            const info = pref.show === 'usage' ? cmd.usage : cmd.description;
+                            if (pref.show === 'none') {
+                                block += `  ↳ *${cmd.name}*\n`;
+                            } else {
+                                block += `  ↳ *${cmd.name}*: ${info}\n`;
+                            }
+                        }
+                        block += `\n`;
+                    } else {
+                        block += `╔══  *${mod.name}* ══\n`;
+                        for (const cmd of visible) {
+                            const info = pref.show === 'usage' ? cmd.usage : cmd.description;
+                            if (pref.show === 'none') {
+                                block += `║ *${cmd.name}*\n`;
+                            } else {
+                                block += `║ *${cmd.name}* – ${info}\n`;
+                            }
+                        }
+                        block += `╚═══════════════\n\n`;
+                    }
+                }
+                return block;
+            };
+            let helpText = `🤖 *${config.get('bot.name')} Help Menu*\n\n`;
+helpText += renderModuleBlock(systemModules);
+helpText += renderModuleBlock(customModules);
+await context.bot.sendMessage(context.sender, { text: helpText.trim() });
+
+        }
+    };
+
+    this.bot.messageHandler.registerCommandHandler('help', helpCommand);
+}
+
+    getCommandModule(commandName) {
+        for (const [moduleName, moduleInfo] of this.modules) {
+            if (moduleInfo.instance.commands) {
+                for (const cmd of moduleInfo.instance.commands) {
+                    if (cmd.name === commandName) {
+                        return moduleName;
+                    }
+                }
+            }
+        }
+        return 'Core System';
+    }
+
+    async loadModule(filePath, isSystem) {
+        const moduleId = path.basename(filePath, '.js');
+
+        try {
+            delete require.cache[require.resolve(filePath)];
+            const mod = require(filePath);
+
+            const moduleInstance = typeof mod === 'function' && /^\s*class\s/.test(mod.toString()) 
+                                   ? new mod(this.bot) 
+                                   : mod;
+
+            const actualModuleId = (moduleInstance && moduleInstance.name) ? moduleInstance.name : moduleId;
+
+            // Validate module structure
+            if (!moduleInstance.metadata) {
+                moduleInstance.metadata = {
+                    description: 'No description provided',
+                    version: 'Unknown',
+                    author: 'Unknown',
+                    category: 'Uncategorized',
+                    dependencies: []
+                };
+            }
+
+            if (moduleInstance.init && typeof moduleInstance.init === 'function') {
+                await moduleInstance.init();
+            }
+
+            if (Array.isArray(moduleInstance.commands)) {
+                for (const cmd of moduleInstance.commands) {
+    if (!cmd.name || !cmd.description || !cmd.usage || !cmd.execute) {
+        logger.warn(`⚠️ Invalid command in module ${actualModuleId}: ${JSON.stringify(cmd)}`);
+        continue;
+    }
+
+                    const ui = cmd.ui || {};
+
+                    // Only wrap commands that have UI config (structured modules)
+const shouldWrap = cmd.ui && (cmd.autoWrap !== false);
+const wrappedCmd = shouldWrap ? {
+    ...cmd,
+    execute: async (msg, params, context) => {
+        await helpers.smartErrorRespond(context.bot, msg, {
+            processingText: ui.processingText || `⏳ Running *${cmd.name}*...`,
+            errorText: ui.errorText || `❌ *${cmd.name}* failed.`,
+            actionFn: async () => {
+                return await cmd.execute(msg, params, context);
             }
         });
-
-        this.sock.ev.on('creds.update', saveCreds);
-        this.sock.ev.on('messages.upsert', this.messageHandler.handleMessages.bind(this.messageHandler));
-        this.sock.ev.on('messages.delete', this.handleMessageDelete.bind(this));
-        this.sock.ev.on('group-participants.update', this.handleGroupUpdate.bind(this));
     }
+} : cmd; // Use original command without wrapping
 
-    async handleMessageDelete(deleteInfo) {
-        try {
-            for (const key of deleteInfo.keys) {
-                const groupId = key.remoteJid;
-                if (!groupId?.endsWith('@g.us')) continue;
 
-                const { antidelete } = await groupDB(['delete'], { jid: groupId, content: {} }, 'get');
-                if (antidelete === 'true') {
-                    // Forward the deleted message info
-                    await this.sock.sendMessage(groupId, {
-                        text: `🗑️ *Message Deleted*\n\n👤 From: @${key.participant?.split('@')[0] || 'Unknown'}\n⏰ Time: ${new Date().toLocaleString()}`,
-                        mentions: key.participant ? [key.participant] : []
-                    });
+                    this.bot.messageHandler.registerCommandHandler(cmd.name, wrappedCmd);
                 }
             }
-        } catch (error) {
-            logger.error('Error handling message delete:', error);
-        }
-    }
-
-    async handleGroupUpdate(update) {
-        try {
-            const { id: groupId, participants, action } = update;
-            
-            // Handle promote/demote protection
-            if (action === 'promote' || action === 'demote') {
-                const settings = await groupDB([action], { jid: groupId, content: {} }, 'get');
-                if (settings[action] === 'true') {
-                    // Reverse the action
-                    const reverseAction = action === 'promote' ? 'demote' : 'promote';
-                    for (const participant of participants) {
-                        await this.sock.groupParticipantsUpdate(groupId, [participant], reverseAction);
-                    }
-                    await this.sock.sendMessage(groupId, {
-                        text: `🔒 Anti-${action} protection activated. Action reversed.`
-                    });
+            if (moduleInstance.messageHooks && typeof moduleInstance.messageHooks === 'object' && moduleInstance.messageHooks !== null) {
+                for (const [hook, fn] of Object.entries(moduleInstance.messageHooks)) {
+                    this.bot.messageHandler.registerMessageHook(hook, fn.bind(moduleInstance));
                 }
             }
 
-            // Handle welcome/goodbye messages
-            if (action === 'add' || action === 'remove') {
-                const welcomeSettings = await groupDB(['welcome', 'exit'], { jid: groupId, content: {} }, 'get');
-                await greetings({ id: groupId, participants, action }, this.sock, welcomeSettings);
+            this.modules.set(actualModuleId, {
+                instance: moduleInstance,
+                path: filePath,
+                isSystem
+            });
+
+            if (isSystem) {
+                this.systemModulesCount++;
+            } else {
+                this.customModulesCount++;
             }
 
-        } catch (error) {
-            logger.error('Error handling group update:', error);
-        }
+} catch (err) {
+    logger.error(`❌ Failed to load module '${moduleId}' from ${filePath}`);
+    logger.error(`Error message: ${err.message}`);
+
+}
+
     }
 
-    async onConnectionOpen() {
-        logger.info(`✅ Connected to WhatsApp! User: ${this.sock.user?.id || 'Unknown'}`);
+    getModule(name) {
+        return this.modules.get(name)?.instance || null;
+    }
 
-        if (!config.get('bot.owner') && this.sock.user) {
-            config.set('bot.owner', this.sock.user.id);
-            logger.info(`👑 Owner set to: ${this.sock.user.id}`);
+    listModules() {
+        return [...this.modules.keys()];
+    }
+    
+    async unloadModule(moduleId) {
+        const moduleInfo = this.modules.get(moduleId);
+        if (!moduleInfo) {
+            throw new Error(`Module ${moduleId} not found`);
         }
 
-        if (this.telegramBridge) {
-            try {
-                await this.telegramBridge.setupWhatsAppHandlers();
-            } catch (err) {
-                logger.warn('⚠️ Failed to setup Telegram WhatsApp handlers:', err.message);
+        if (moduleInfo.instance.destroy && typeof moduleInfo.instance.destroy === 'function') {
+            await moduleInfo.instance.destroy();
+        }
+
+        if (Array.isArray(moduleInfo.instance.commands)) {
+            for (const cmd of moduleInfo.instance.commands) {
+                if (cmd.name) {
+                    this.bot.messageHandler.unregisterCommandHandler(cmd.name);
+                }
             }
         }
-
-        await this.sendStartupMessage();
-
-        if (this.telegramBridge) {
-            try {
-                await this.telegramBridge.syncWhatsAppConnection();
-            } catch (err) {
-                logger.warn('⚠️ Telegram sync error:', err.message);
-            }
-        }
-    }
-
-    async sendStartupMessage() {
-        const owner = config.get('bot.owner');
-        if (!owner) return;
-
-        const authMethod = this.useMongoAuth ? 'MongoDB' : 'File-based';
-        const startupMessage = `🚀 *${config.get('bot.name')} v${config.get('bot.version')}* is now online!\n\n` +
-                              `🔥 *HyperWa Features Active:*\n` +
-                              `• 📱 Modular Architecture\n` +
-                              `• 🔐 Auth Method: ${authMethod}\n` +
-                              `• 🤖 Telegram Bridge: ${config.get('telegram.enabled') ? '✅' : '❌'}\n` +
-                              `• 🔧 Custom Modules: ${config.get('features.customModules') ? '✅' : '❌'}\n` +
-                              `Type *${config.get('bot.prefix')}help* for available commands!`;
-
-        try {
-            await this.sock.sendMessage(owner, { text: startupMessage });
-        } catch {}
-
-        if (this.telegramBridge) {
-            try {
-                await this.telegramBridge.logToTelegram('🚀 HyperWa Bot Started', startupMessage);
-            } catch (err) {
-                logger.warn('⚠️ Telegram log failed:', err.message);
-            }
-        }
-    }
-
-    async connect() {
-        if (!this.sock) {
-            await this.startWhatsApp();
-        }
-        return this.sock;
-    }
-
-    async sendMessage(jid, content) {
-        if (!this.sock) {
-            throw new Error('WhatsApp socket not initialized');
-        }
-        return await this.sock.sendMessage(jid, content);
-    }
-
-    async shutdown() {
-        logger.info('🛑 Shutting down HyperWa Userbot...');
-        this.isShuttingDown = true;
-
-        if (this.telegramBridge) {
-            try {
-                await this.telegramBridge.shutdown();
-            } catch (err) {
-                logger.warn('⚠️ Telegram shutdown error:', err.message);
+        if (moduleInfo.instance.messageHooks && typeof moduleInfo.instance.messageHooks === 'object') {
+            for (const hook of Object.keys(moduleInfo.instance.messageHooks)) {
+                this.bot.messageHandler.unregisterMessageHook(hook);
             }
         }
 
-        if (this.sock) {
-            await this.sock.end();
-        }
+        this.modules.delete(moduleId);
+        delete require.cache[moduleInfo.path];
+        logger.info(`🚫 Unloaded module: ${moduleId}`);
+    }
 
-        logger.info('✅ HyperWa Userbot shutdown complete');
+    async reloadModule(moduleId) {
+        const moduleInfo = this.modules.get(moduleId);
+        if (!moduleInfo) {
+            throw new Error(`Module ${moduleId} not found for reloading`);
+        }
+        
+        logger.info(`🔄 Reloading module: ${moduleId}`);
+        await this.unloadModule(moduleId);
+        await this.loadModule(moduleInfo.path, moduleInfo.isSystem);
+        logger.info(`✅ Reloaded module: ${moduleId}`);
     }
 }
 
-module.exports = { HyperWaBot };
+module.exports = ModuleLoader;

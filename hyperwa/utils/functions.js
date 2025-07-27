@@ -7,6 +7,8 @@ const ffmpeg = require("fluent-ffmpeg");
 const { spawn } = require("child_process");
 const FormData = require("form-data");
 const ID3Writer = require("browser-id3-writer");
+const { getRandom, getBuffer, fetchJson, runtime, sleep, isUrl, bytesToSize, getSizeMedia, check } = require("i-nrl");
+const config = require('../config');
 
 async function isAdmin(m, sock) {
 	if (!m.key.remoteJid.endsWith('@g.us')) return false;
@@ -64,6 +66,9 @@ function parsedJid(text) {
 	return text.match(/[0-9]+(-[0-9]+|)(@g.us|@s.whatsapp.net)/g);
 }
 
+const MODE = config.get('features.mode') !== 'public';
+const PREFIX = config.get('bot.prefix') || '.';
+
 function extractUrlsFromString(text) {
 	if (!text) return false;
 	const regexp = /https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()'@:%_\+.~#?!&//=]*)/gi;
@@ -104,6 +109,20 @@ function MediaUrls(text) {
 
 function isInstagramURL(url) {
 	return /^https?:\/\/(www\.)?instagram\.com\/.*/i.test(url);
+}
+
+function linkPreview(options = {}) {
+	const LINK_PREVIEW = config.get('bot.linkPreview') || 'HyperWa;Advanced WhatsApp Bot;https://i.imgur.com/qyvmAzS.jpeg;https://github.com/hyperwa-official';
+	if (!LINK_PREVIEW || LINK_PREVIEW.toLowerCase() === 'false' || LINK_PREVIEW.toLowerCase() === 'null') return undefined;
+	const [title, body, thumb, source] = LINK_PREVIEW.split(/[;,|]/);
+	return {
+		showAdAttribution: true,
+		title: options.title || title || 'HyperWa',
+		body: options.body || body,
+		mediaType: 1,
+		thumbnailUrl: options.url || thumb || 'https://i.imgur.com/qyvmAzS.jpeg',
+		sourceUrl: source || 'https://github.com/hyperwa-official'
+	};
 }
 
 const format = function(code) {
@@ -165,78 +184,39 @@ function addSpace(text, length = 3, align = "left") {
 	return text;
 }
 
-async function getBuffer(url) {
-	try {
-		const response = await axios({
-			method: 'GET',
-			url,
-			responseType: 'arraybuffer'
-		});
-		return Buffer.from(response.data);
-	} catch (error) {
-		throw new Error(`Failed to get buffer: ${error.message}`);
+async function sendUrl(message) {
+	const api = 'your_imgbb_api_key'; // You need to set this
+	if(message.reply_message.sticker) {
+		const imageBuffer = await message.reply_message.download();
+		const form = new FormData();
+		form.append('image', imageBuffer, 'bt.jpg');
+		form.append('key', api);
+		const response = await axios.post('https://api.imgbb.com/1/upload', form, {
+			headers: form.getHeaders()
+		}).catch(e=>e.response);
+		return await message.send(response.data.data.image.url);
+	} else if (message.reply_message.image || message.image) {
+		const msg = message.reply_message.image || message.image;
+		const url = await uploadImageToImgur(await message.client.downloadAndSaveMediaMessage(msg))
+		return await message.send(url);
+	} else if (message.reply_message.video || message.video) {
+		const msg = message.reply_message.video || message.video
+		const url = await uploadImageToImgur(await message.client.downloadAndSaveMediaMessage(msg))
+		return await message.send(url);
+	} else if (message.reply_message.audio) {
+		const msg = message.reply_message.audio;
+		let urvideo = await message.client.downloadAndSaveMediaMessage(msg)
+		await ffmpeg(urvideo)
+			.outputOptions(["-y", "-filter_complex", "[0:a]showvolume=f=1:b=4:w=720:h=68,format=yuv420p[vid]", "-map", "[vid]", "-map 0:a"])
+			.save('output.mp4')
+			.on('end', async () => {
+				const url = await uploadImageToImgur('./output.mp4')
+				return await message.send(url);
+			});
 	}
 }
 
-function sleep(ms) {
-	return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function isUrl(text) {
-	try {
-		new URL(text);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-function bytesToSize(bytes) {
-	const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
-	if (bytes === 0) return '0 Byte';
-	const i = parseInt(Math.floor(Math.log(bytes) / Math.log(1024)));
-	return Math.round(bytes / Math.pow(1024, i), 2) + ' ' + sizes[i];
-}
-
-function runtime(seconds) {
-	seconds = Number(seconds);
-	var d = Math.floor(seconds / (3600 * 24));
-	var h = Math.floor(seconds % (3600 * 24) / 3600);
-	var m = Math.floor(seconds % 3600 / 60);
-	var s = Math.floor(seconds % 60);
-	var dDisplay = d > 0 ? d + (d == 1 ? " day, " : " days, ") : "";
-	var hDisplay = h > 0 ? h + (h == 1 ? " hour, " : " hours, ") : "";
-	var mDisplay = m > 0 ? m + (m == 1 ? " minute, " : " minutes, ") : "";
-	var sDisplay = s > 0 ? s + (s == 1 ? " second" : " seconds") : "";
-	return dDisplay + hDisplay + mDisplay + sDisplay;
-}
-
-function getRandom(ext) {
-	return `${Math.floor(Math.random() * 10000)}${ext}`;
-}
-
-function check(word) {
-	// Simple word validation - in real implementation, use a dictionary API
-	return word && word.length > 2;
-}
-
-function linkPreview(options = {}) {
-	const config = require('../config');
-	const LINK_PREVIEW = config.get('bot.linkPreview') || 'HyperWa;Advanced WhatsApp Bot;https://i.imgur.com/qyvmAzS.jpeg;https://github.com/hyperwa-official';
-	if (!LINK_PREVIEW || LINK_PREVIEW.toLowerCase() === 'false' || LINK_PREVIEW.toLowerCase() === 'null') return undefined;
-	const [title, body, thumb, source] = LINK_PREVIEW.split(/[;,|]/);
-	return {
-		showAdAttribution: true,
-		title: options.title || title || 'HyperWa',
-		body: options.body || body,
-		mediaType: 1,
-		thumbnailUrl: options.url || thumb || 'https://i.imgur.com/qyvmAzS.jpeg',
-		sourceUrl: source || 'https://github.com/hyperwa-official'
-	};
-}
-
-async function send_menu(message) {
-    const config = require('../config');
+async function send_menu(m) {
     const BOT_INFO = config.get('bot.name') + ';' + config.get('bot.company') + ';https://i.imgur.com/qyvmAzS.jpeg';
     const image = MediaUrls(BOT_INFO);
     let img_url;
@@ -245,7 +225,7 @@ async function send_menu(message) {
     
     if (image) {
         img_url = image[0];
-        theam = img_url.video ? 'video' : 'image';
+        theam = img_url.includes('.mp4') ? 'video' : 'image';
         botInfoContent = botInfoContent.replace(img_url, '').trim();
     }
     
@@ -257,17 +237,17 @@ async function send_menu(message) {
     });
     let types = {};
     let menu = `*Owner: ${(info_vars[0] || info_vars || '').replace(/[;,|]/g,'')}*
-*User: @${message.number}*
-*Plugins: ${message.client.moduleLoader?.modules?.size || 0}*
-*Prefix: ${config.get('bot.prefix')}*
+*User: @${m.number}*
+*Plugins: ${m.client?.moduleLoader?.modules?.size || 0}*
+*Prefix: ${PREFIX}*
 *Date: ${date}*
 *Mode: ${config.get('features.mode')}*
 *Version: ${config.get('bot.version')}*
 *Ram: ${format(os.totalmem()-os.freemem())}*\n\n`;
 
-    // Get modules and their commands
-    if (message.client.moduleLoader?.modules) {
-        for (const [name, moduleInfo] of message.client.moduleLoader.modules) {
+    // Get commands from modules if available
+    if (m.client?.moduleLoader?.modules) {
+        for (const [name, moduleInfo] of m.client.moduleLoader.modules) {
             if (moduleInfo.instance.commands) {
                 for (const command of moduleInfo.instance.commands) {
                     const type = (command.category || 'misc').toLowerCase();
@@ -289,7 +269,7 @@ async function send_menu(message) {
 
     const options = {
         contextInfo: {
-            mentionedJid: [message.sender]
+            mentionedJid: [m.sender]
         }
     };
 
@@ -299,12 +279,12 @@ async function send_menu(message) {
     }
 
     if (theam == 'text') {
-        return await message.client.sendMessage(message.jid, {
+        return await m.client.sendMessage(m.jid, {
             text: menu,
             ...options
         });
     } else {
-        return await message.client.sendMessage(message.from, {
+        return await m.client.sendMessage(m.from, {
             [theam]: {
                 url: img_url
             },
@@ -314,13 +294,12 @@ async function send_menu(message) {
     }
 }
 
-async function send_alive(message, ALIVE_DATA) {
-	const config = require('../config');
+async function send_alive(m, ALIVE_DATA) {
 	const sstart = new Date().getTime();
 	let msg = {
 		contextInfo: {}
 	}
-	const prefix = config.get('bot.prefix') == "false" ? '' : config.get('bot.prefix');
+	const prefix = PREFIX;
 	let extractions = ALIVE_DATA.match(/#(.*?)#/g);
 	let URLS;
 	if (extractions) {
@@ -355,9 +334,10 @@ async function send_alive(message, ALIVE_DATA) {
 	});
 	const URL = URLS ? URLS[Math.floor(Math.random() * URLS.length)] : null;
 	const platform = os.platform();
-	const sender = message.sender;
-	const user = message.pushName;
-	let text = ALIVE_DATA.replace(/&ram/gi, format(os.totalmem() - os.freemem())).replace(/&sender/gi, `@${sender.replace(/[^0-9]/g,'')}`).replace(/&user/gi, `${user}`).replace(/&version/gi, `${config.get('bot.version')}`).replace(/&prefix/gi, `${prefix}`).replace(/&mode/gi, `${config.get('features.mode')}`).replace(/&platform/gi, `${platform}`).replace(/&date/gi, `${date}`).replace(/&speed/gi, `${sstart-new Date().getTime()}`).replace(/&gif/g, '');
+	const sender = m.sender;
+	const user = m.pushName;
+	const package = require('../../package.json');
+	let text = ALIVE_DATA.replace(/&ram/gi, format(os.totalmem() - os.freemem())).replace(/&sender/gi, `@${sender.replace(/[^0-9]/g,'')}`).replace(/&user/gi, `${user}`).replace(/&version/gi, `${package.version}`).replace(/&prefix/gi, `${prefix}`).replace(/&mode/gi, `${config.get('features.mode')}`).replace(/&platform/gi, `${platform}`).replace(/&date/gi, `${date}`).replace(/&speed/gi, `${sstart-new Date().getTime()}`).replace(/&gif/g, '');
 	if (ALIVE_DATA.includes('&sender')) msg.contextInfo.mentionedJid = [sender];
 	if (ALIVE_DATA.includes('&gif')) msg.gifPlayback = true;
 	if (URL && URL.endsWith('.mp4')) {
@@ -373,7 +353,35 @@ async function send_alive(message, ALIVE_DATA) {
 			msg.caption = URLS.map(url => text = text.replace(url, ''));
 
 	} else msg.text = text.trim();
-	return await message.client.sendMessage(message.jid, msg);
+	return await m.client.sendMessage(m.jid, msg);
+}
+
+async function poll(id) {
+	if (!fs.existsSync('./hyperwa/database/poll.json')) return {
+		status: false
+	}
+	const file = JSON.parse(fs.readFileSync('./hyperwa/database/poll.json'));
+	const poll_res = file.message.filter(a => id.key.id == Object.keys(a)[0]);
+	if (!poll_res[0]) return {
+		status: false
+	}
+	let options = {}
+	const vote_id = Object.keys(poll_res[0]);
+	const vote_obj = Object.keys(poll_res[0][vote_id].votes);
+	let total_votes = 0;
+	vote_obj.map(a => {
+		options[a] = {
+			count: poll_res[0][vote_id].votes[a].length
+		};
+		total_votes = total_votes + poll_res[0][vote_id].votes[a].length
+	});
+	const keys = Object.keys(options);
+	keys.map(a => options[a].percentage = (options[a].count / total_votes) * 100 + '%');
+	return {
+		status: true,
+		res: options,
+		total: total_votes
+	}
 }
 
 module.exports = {
@@ -382,6 +390,8 @@ module.exports = {
 	getCompo,
 	getDate,
 	parsedJid,
+	PREFIX,
+	MODE,
 	extractUrlsFromString,
 	getJson,
 	isIgUrl,
@@ -389,18 +399,22 @@ module.exports = {
 	isNumber,
 	MediaUrls,
 	isInstagramURL,
+	linkPreview,
 	format,
 	uploadImageToImgur,
 	AudioMetaData,
 	addSpace,
+	sendUrl,
+	send_menu,
+	send_alive,
+	poll,
+	getRandom,
 	getBuffer,
+	fetchJson,
+	runtime,
 	sleep,
 	isUrl,
 	bytesToSize,
-	runtime,
-	getRandom,
-	check,
-	linkPreview,
-	send_menu,
-	send_alive
+	getSizeMedia,
+	check
 };
