@@ -1,4 +1,7 @@
-const { Sequelize, DataTypes } = require("sequelize");
+const {
+    Sequelize,
+    DataTypes
+} = require("sequelize");
 const { sequelizeDb } = require("./db");
 
 const methods = ['get', 'set', 'add','delete'];
@@ -156,5 +159,4 @@ async function groupDB(type, options, method) {
         }
     }
 }
-
-module.exports = { groupDB };
+module.exports = {groupDB};
