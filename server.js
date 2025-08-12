@@ -11,6 +11,8 @@ const fs = require('fs');
 const express = require("express");
 const session = require('express-session');
 const axios = require('axios');
+const qrcode = require('qrcode-terminal');
+const chalk = require('chalk');
 
 const workers = {};
 const logFilePath = path.join(__dirname, 'worker-logs.txt');

@@ -141,8 +141,8 @@ document.addEventListener('DOMContentLoaded', function() {
             .then(response => response.json())
             .then(data => {
                 const workersRunning = data.process.workers.length > 0;
-                document.getElementById('statusStat').textContent = workersRunning ? 'Online' : 'Offline';
-                document.getElementById('statusDetail').textContent = workersRunning ? 'Running' : 'Stopped';
+                document.getElementById('statusStat').textContent = workersRunning ? 'Connected' : 'Disconnected';
+                document.getElementById('statusDetail').textContent = workersRunning ? 'WhatsApp Connected' : 'Scan QR to connect';
                 
                 const statusIcon = document.querySelector('.stat-icon.danger');
                 if (workersRunning) {
